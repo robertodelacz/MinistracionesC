@@ -72,62 +72,6 @@ const CONFIG_MENSAJES = {
 };
 
 
-/* ============================================================
-   CONFIGURACIÓN DEL WEBHOOK (una sola vez)
-   ============================================================ */
-
-
-
-/**
- * Envía un texto al webhook de Google Chat, a un hilo específico.
- * Si claveHilo tiene formato "spaces/.../threads/...", se usa como
- * nombre real de un hilo existente. Si no, se trata como threadKey
- * (clave libre para que Chat agrupe o abra un hilo nuevo).
- * Devuelve true/false según si el envío fue exitoso.
- */
-function enviarMensajeWebhook_(texto, claveHilo) {
-  const webhookUrl = PropertiesService.getScriptProperties().getProperty("WEBHOOK_URL");
-
-  if (!webhookUrl) {
-    Logger.log("⚠️ No hay URL de webhook guardada. Corre configurarWebhookMensajes() primero.");
-    return false;
-  }
-  if (!claveHilo) {
-    Logger.log("⚠️ No hay clave de hilo configurada (S1/S2). No se envió el mensaje.");
-    return false;
-  }
-
-  try {
-    const url = `${webhookUrl}&messageReplyOption=REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD`;
-    const valor = claveHilo.toString().trim();
-    const esNombreDeHiloReal = valor.startsWith("spaces/") && valor.includes("/threads/");
-
-    const payload = {
-      text: texto,
-      thread: esNombreDeHiloReal ? { name: valor } : { threadKey: valor }
-    };
-
-    const options = {
-      method: "post",
-      contentType: "application/json; charset=UTF-8",
-      payload: JSON.stringify(payload),
-      muteHttpExceptions: true
-    };
-
-    const response = UrlFetchApp.fetch(url, options);
-    const codigo = response.getResponseCode();
-
-    if (codigo === 200) return true;
-
-    Logger.log(`❌ Error al enviar al webhook (código ${codigo}): ${response.getContentText()}`);
-    return false;
-
-  } catch (err) {
-    Logger.log(`❌ Excepción al enviar al webhook: ${err.message}`);
-    return false;
-  }
-}
-
 
 /* ============================================================
    GENERAR: arma el texto del mensaje en O/P. NO envía nada.
