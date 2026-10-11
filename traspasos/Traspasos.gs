@@ -732,8 +732,13 @@ function trasIngesta_(ss, o, t0) {
   const resumen = { ok: true, nuevas: 0, mensajes: 0, sinLectura: 0, omitidos: 0, errores: 0, pendientesProximaCorrida: 0, mensaje: '' };
   if (!cat.hayDatos) resumen.aviso = 'El catálogo está vacío: se leerán las capturas pero no se podrán validar cuentas. Corre "Importar catálogo".';
 
-  const desde = Math.floor((Date.now() - (o.horasAtras || TRAS.HORAS_ATRAS) * 3600 * 1000) / 1000);
-  const consulta = 'subject:(' + TRAS.ASUNTO_PALABRAS + ') after:' + desde;
+  let desde = Math.floor((Date.now() - (o.horasAtras || TRAS.HORAS_ATRAS) * 3600 * 1000) / 1000);
+  let hastaMs = Infinity, filtroDia = '';
+  if (o.dia) {                                                   // prueba de un día completo (hora de México)
+    const ini = Utilities.parseDate(o.dia + ' 00:00', TRAS.TZ, 'yyyy-MM-dd HH:mm').getTime();
+    desde = Math.floor(ini / 1000); hastaMs = ini + 24 * 3600 * 1000; filtroDia = ' before:' + Math.floor(hastaMs / 1000);
+  }
+  const consulta = 'subject:(' + TRAS.ASUNTO_PALABRAS + ') after:' + desde + filtroDia;
   const hilos = GmailApp.search(consulta, 0, TRAS.MAX_HILOS) || [];
   const idx = trasIndice_(hoja, mapa);
   const yo = trasUsuario_().toLowerCase();
@@ -746,7 +751,7 @@ function trasIngesta_(ss, o, t0) {
     try { ms = hilo.getMessages(); } catch (e) { return; }
     // Solo se revisan adjuntos de lo que falta por procesar (ahorra lecturas de Gmail en cada corrida)
     const nuevos = ms.filter(function (m) {
-      if (m.getDate().getTime() < ventanaMs) return false;
+      if (m.getDate().getTime() < ventanaMs || m.getDate().getTime() >= hastaMs) return false;
       if (idx.msgs[m.getId()]) return false;
       let borrador = false; try { borrador = m.isDraft(); } catch (e) {}
       if (borrador) return false;
@@ -784,7 +789,7 @@ function trasIngesta_(ss, o, t0) {
   const nuevos = [];
   const principalEnCorrida = {};
   for (let i = 0; i < aceptados.length; i++) {
-    if (i >= TRAS.MAX_MENSAJES_POR_CORRIDA || (Date.now() - t0) > TRAS.TIEMPO_MAX_MS) { resumen.pendientesProximaCorrida = aceptados.length - i; break; }
+    if (i >= (o.maxMensajes || TRAS.MAX_MENSAJES_POR_CORRIDA) || (Date.now() - t0) > TRAS.TIEMPO_MAX_MS) { resumen.pendientesProximaCorrida = aceptados.length - i; break; }
     const c = aceptados[i];
     try {
       const regs = trasProcesarMensaje_(ss, c, cat, idx, principalEnCorrida, o);
@@ -1071,6 +1076,44 @@ function traspasosOnEdit_(e) {
 }
 
 /* ======================================================================
+   PRUEBA DE UN DÍA  (no toca la hoja TRASPASOS V2)
+   Procesa TODOS los correos de traspasos de ese día con las mismas reglas y el mismo OCR,
+   y deja el resultado en la hoja "PRUEBA TRASPASOS" (se borra y se rehace cada vez).
+   ====================================================================== */
+function traspasosProbarDia(fechaISO) {
+  const dia = trasDiaDeTexto_(fechaISO);
+  if (!dia) throw new Error('Fecha no válida. Usa 2026-10-09 o 09/10/2026.');
+  const ss = trasSS_();
+  const original = TRAS.HOJA;
+  const vieja = ss.getSheetByName('PRUEBA TRASPASOS');
+  if (vieja) ss.deleteSheet(vieja);
+  TRAS.HOJA = 'PRUEBA TRASPASOS';
+  let r;
+  try { r = traspasosActualizar({ dia: dia, maxMensajes: 40, esperaMs: 3000 }); }
+  finally { TRAS.HOJA = original; }
+  const msg = 'Prueba del ' + dia + ': ' + r.mensaje + (r.omitidos ? ' · Omitidos por la regla del hilo: ' + r.omitidos + ' (el detalle está en LOG TRASPASOS V2).' : '') + ' Mira la hoja "PRUEBA TRASPASOS".';
+  Logger.log(msg);
+  const ui = trasUi_(); if (ui) ui.alert(msg);
+  return r;
+}
+
+function traspasosProbarDiaMenu() {
+  const ui = trasUi_(); if (!ui) throw new Error('Ejecuta esto desde el menú del libro.');
+  const r = ui.prompt('Probar un día', 'Fecha de los correos (ej. 09/10/2026 o 2026-10-09). No toca la hoja TRASPASOS V2.', ui.ButtonSet.OK_CANCEL);
+  if (r.getSelectedButton() !== ui.Button.OK) return;
+  traspasosProbarDia(r.getResponseText());
+}
+
+function trasDiaDeTexto_(t) {
+  const x = String(t || '').trim();
+  let m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(x);
+  if (m) return m[1] + '-' + trasPad2_(m[2]) + '-' + trasPad2_(m[3]);
+  m = /^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{4})$/.exec(x);
+  if (m) return m[3] + '-' + trasPad2_(m[2]) + '-' + trasPad2_(m[1]);
+  return '';
+}
+
+/* ======================================================================
    DISPARADOR AUTOMÁTICO  +  CLAVE  +  COMPATIBILIDAD
    ====================================================================== */
 
@@ -1078,6 +1121,7 @@ function traspasosOnEdit_(e) {
 function traspasosMenu_() {
   return SpreadsheetApp.getUi().createMenu('🏦 Traspasos')
     .addItem('🔄 Actualizar traspasos', 'revisarTraspasos')
+    .addItem('🧪 Probar un día completo…', 'traspasosProbarDiaMenu')
     .addSeparator()
     .addItem('📋 Importar catálogo desde el historial', 'traspasosImportarCatalogo')
     .addItem('🔑 Guardar clave de Claude', 'traspasosGuardarClave')
