@@ -733,11 +733,7 @@ function trasIngesta_(ss, o, t0) {
       : (nuevos.filter(function (m) { return !trasEsRespuesta_(m.getSubject()); })[0] || nuevos[0] || null);
     nuevos.forEach(function (m) {
       const esPrimero = !!primero && primero.getId() === m.getId();
-      if (!esPrimero) {
-        // Mensaje posterior del hilo: solo si dice "extraordinario" o pide el Vo.Bo. de otro traspaso
-        const nuevoTxt = trasTextoNuevo_(m.getPlainBody());
-        if (!TRAS.SEGUNDO_TRASPASO.test(m.getSubject() || '') && !TRAS.SEGUNDO_TRASPASO.test(nuevoTxt)) return;
-      }
+      if (!trasClasificarMensajeHilo_(m, esPrimero).entra) return;
       candidatos.push({ msg: m, hiloId: hilo.getId(), esPrimero: esPrimero, posicion: nuevos.indexOf(m) });
     });
   });
@@ -770,6 +766,22 @@ function trasIngesta_(ss, o, t0) {
   if (resumen.errores) resumen.mensaje += ' ' + resumen.errores + ' con error (se reintentan).';
   trasLog_(ss, 'INFO', resumen.mensaje, JSON.stringify({ consulta: consulta, hilos: hilos.length, candidatos: candidatos.length }));
   return resumen;
+}
+
+
+/**
+ * Regla única del hilo (la usan la ingesta y el explicador):
+ *  · el primer correo del hilo con captura SIEMPRE entra (Principal)
+ *  · los siguientes solo si el asunto o el texto NUEVO dicen "extraordinario" / piden Vo.Bo.
+ *  · todo lo demás del hilo (publicaciones, comprobantes finales, respuestas) NO se valida
+ */
+function trasClasificarMensajeHilo_(msg, esPrimero) {
+  if (esPrimero) return { entra: true, motivo: 'Primer correo del hilo con captura → Principal' };
+  const asunto = msg.getSubject() || '';
+  const nuevo = trasTextoNuevo_(msg.getPlainBody());
+  if (/extraordinari/i.test(asunto) || /extraordinari/i.test(nuevo)) return { entra: true, motivo: 'Dice "extraordinario" → Extraordinario' };
+  if (TRAS.SEGUNDO_TRASPASO.test(asunto) || TRAS.SEGUNDO_TRASPASO.test(nuevo)) return { entra: true, motivo: 'Pide Vo.Bo. de otro traspaso → Extraordinario' };
+  return { entra: false, motivo: 'IGNORADO: no es el primer correo y su texto nuevo no dice "extraordinario" ni pide Vo.Bo.' };
 }
 
 /** Procesa un correo → arreglo de registros (uno por operación). null = fallo transitorio, se reintenta. */
@@ -1067,5 +1079,33 @@ function traspasosDiagnosticar(messageId) {
     (l.operaciones || []).forEach(function (op) {
       Logger.log(JSON.stringify(trasValidar_(op, { diaCorreo: trasDiaMx_(msg.getDate()), fechaAsunto: trasFechaAsunto_(asunto), destinoAsunto: trasDestinoDeAsunto_(asunto, cat), cat: cat }), null, 1));
     });
+  });
+}
+
+/**
+ * Explica un hilo completo: para cada mensaje dice si se validaría y por qué.
+ * No escribe nada. Pasa el ID de CUALQUIER mensaje del hilo (ver listarCorreosTraspaso en Pruebas.gs).
+ */
+function traspasosExplicarHilo(messageId) {
+  const ss = trasSS_(); const cat = trasCargarCatalogo_(ss);
+  const base = GmailApp.getMessageById(messageId);
+  if (!base) { Logger.log('Mensaje no encontrado'); return; }
+  const hilo = base.getThread();
+  const ms = hilo.getMessages();
+  const yo = trasUsuario_().toLowerCase();
+  Logger.log('HILO: ' + trasLimpiarAsunto_(base.getSubject()) + ' · ' + ms.length + ' mensaje(s)');
+  let primeroVisto = false;
+  ms.forEach(function (m, i) {
+    const asunto = m.getSubject() || '';
+    const fecha = Utilities.formatDate(m.getDate(), TRAS.TZ, 'dd/MM HH:mm');
+    const cab = (i + 1) + '. ' + fecha + ' · ' + String(m.getFrom() || '').replace(/<.*$/, '').trim() + ' · "' + asunto + '"';
+    if (!trasEsAsuntoTraspaso_(asunto, cat)) { Logger.log(cab + '\n   → no cuenta: el asunto no es de traspasos'); return; }
+    if (yo && String(m.getFrom() || '').toLowerCase().indexOf(yo) >= 0) { Logger.log(cab + '\n   → no cuenta: lo enviaste tú'); return; }
+    const nImg = trasImagenesDe_(m).length;
+    if (!nImg) { Logger.log(cab + '\n   → no cuenta: no trae imágenes válidas'); return; }
+    const esPrimero = !primeroVisto && !trasEsRespuesta_(asunto);
+    if (esPrimero) primeroVisto = true;
+    const d = trasClasificarMensajeHilo_(m, esPrimero);
+    Logger.log(cab + ' · ' + nImg + ' imagen(es)\n   → ' + (d.entra ? 'SE VALIDA: ' : '') + d.motivo);
   });
 }
