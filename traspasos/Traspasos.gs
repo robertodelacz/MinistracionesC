@@ -32,7 +32,19 @@ const TRAS = {
   EXCLUIR_ASUNTO: /SOLICITUD\s+TRASPASO\s+ENTRE\s+CUENTAS/i,   // correos de otro proceso
   // Después del primer correo del hilo, solo cuentan los mensajes que digan esto (extraordinario o pidiendo Vo.Bo.).
   // Todo lo demás del hilo (publicaciones, comprobantes finales, respuestas) NO se valida.
-  SEGUNDO_TRASPASO: /extraordinari|vo\.?\s*bo\b|vobo|visto\s+bueno/i,
+  // Ojo: "Vo.Bo." suelto NO basta (una publicación como "ya se dio el Vo.Bo." no es un traspaso nuevo);
+  // tiene que ser una PETICIÓN: "favor de dar el Vo.Bo.", "solicito Vo.Bo.", "me apoyas con el visto bueno"...
+  SEGUNDO_TRASPASO: /extraordinari|(?:solicit\w*|pid\w*|requier\w*|necesit\w*|favor|apoy\w*|ayud\w*|podr\w*|puedes|pueden)[^.\n]{0,80}(?:vo\.?\s*bo\b|vobo|visto\s+bueno)/i,
+  // true = el "primer correo" es el primer mensaje del hilo (si ese no trae capturas, el hilo no tiene Principal
+  // y lo que venga después solo cuenta si dice extraordinario / pide Vo.Bo.). false = el primero que traiga capturas.
+  PRIMER_CORREO_ESTRICTO: true,
+  // true = por cada fecha+banco del asunto solo UN hilo puede ser "primer correo"; un correo nuevo (no respuesta) con el
+  // mismo asunto después, p. ej. una publicación, ya no cuenta salvo que diga extraordinario. Déjalo en false si
+  // Cuentas por pagar manda hilos separados para dos traspasos distintos al mismo banco el mismo día.
+  UN_PRINCIPAL_POR_BANCO_Y_DIA: false,
+  // Remitentes (nombre o correo, basta un fragmento) cuyos correos NUNCA son "el primer correo": solo se validan
+  // si dicen extraordinario / piden Vo.Bo. Ej.: ['jazmin']
+  IGNORAR_REMITENTES: [],
   MAX_HILOS: 80,
   MIN_BYTES_IMAGEN: 8 * 1024,            // descarta logos / firmas pequeñas
   MAX_MENSAJES_POR_CORRIDA: 25,
@@ -452,15 +464,18 @@ function trasEsAsuntoTraspaso_(asunto, cat) {
 
 /** Texto nuevo de un correo (sin lo citado de mensajes anteriores). */
 function trasTextoNuevo_(cuerpo) {
-  const lineas = String(cuerpo || '').split(/\r?\n/); const out = [];
-  for (let i = 0; i < lineas.length; i++) {
-    const l = lineas[i];
-    if (/^\s*>/.test(l)) break;
-    if (/^\s*(On .{5,200}wrote:|El .{5,200}escribi[óo]:|-{2,}\s*(Original|Mensaje|Forwarded)|_{5,}|De:\s|From:\s|Enviado el:|Sent:)/i.test(l)) break;
-    out.push(l);
-  }
-  return out.join('\n');
+  const t = '\n' + String(cuerpo || '').replace(/\r/g, '');
+  const corte = /\n\s*>|\n\s*(?:On|El)\s[\s\S]{5,300}?(?:wrote|escribi[óo]):|\n\s*-{2,}\s*(?:Original|Mensaje|Forwarded|Reenviado)|\n\s*_{5,}|\n\s*(?:De|From):\s|\n\s*(?:Enviado el|Enviado|Sent):\s/i;
+  const m = corte.exec(t);
+  return (m ? t.slice(0, m.index) : t).trim();
 }
+
+function trasRemitenteIgnorado_(msg) {
+  const f = trasNorm_(msg.getFrom());
+  return (TRAS.IGNORAR_REMITENTES || []).some(function (x) { const n = trasNorm_(x); return n && f.indexOf(n) >= 0; });
+}
+/** Clave "un solo primer correo por fecha y banco" (vacía si falta alguno de los dos datos). */
+function trasClaveDia_(fechaAsunto, destino) { return (fechaAsunto && destino) ? fechaAsunto + '|' + destino : ''; }
 
 function trasEsImagen_(a) {
   let ct = '', nom = '';
@@ -659,7 +674,7 @@ function trasLog_(ss, nivel, mensaje, detalle) {
 
 /** Índice de lo que ya está en la hoja (mensajes, huellas, hilos con principal, conteos del día). */
 function trasIndice_(hoja, mapa, excluirMsg) {
-  const idx = { msgs: {}, huellas: {}, hilosPrincipal: {}, filas: 0, porDia: {} };
+  const idx = { msgs: {}, huellas: {}, hilosPrincipal: {}, filas: 0, porDia: {}, claves: {} };
   const ult = trasUltimaFila_(hoja, mapa);
   if (ult < TRAS_FILA_DATOS) return idx;
   const n = ult - TRAS_FILA_DATOS + 1;
@@ -674,6 +689,7 @@ function trasIndice_(hoja, mapa, excluirMsg) {
     if (m) idx.msgs[m] = (idx.msgs[m] || 0) + 1;
     if (hue[i]) (idx.huellas[hue[i]] = idx.huellas[hue[i]] || []).push({ msg: m, hilo: String(hilo[i]), fila: TRAS_FILA_DATOS + i });
     if (hilo[i]) idx.hilosPrincipal[String(hilo[i])] = true;      // el hilo ya tiene su primer correo registrado (aunque se haya descartado)
+    if (hilo[i] && tipo[i] === 'Principal') { const kc = trasClaveDia_(trasDiaMx_(fAs[i]), String(dest[i])); if (kc && kc.indexOf('SIN CLASIFICAR') < 0) idx.claves[kc] = String(hilo[i]); }
     const dia = trasDiaMx_(fAs[i]);
     if (dia && est[i] !== 'DESCARTADO') {
       const k = dia + '|' + dest[i];
@@ -729,22 +745,38 @@ function trasIngesta_(ss, o, t0) {
       if (yo && String(m.getFrom() || '').toLowerCase().indexOf(yo) >= 0) return false;      // tus propias respuestas
       return trasImagenesDe_(m).length > 0;
     });
-    const primero = idx.hilosPrincipal[hilo.getId()] ? null
-      : (nuevos.filter(function (m) { return !trasEsRespuesta_(m.getSubject()); })[0] || nuevos[0] || null);
+    const primero = trasPrimeroDelHilo_(ms, nuevos, idx.hilosPrincipal[hilo.getId()], yo);
     nuevos.forEach(function (m) {
-      const esPrimero = !!primero && primero.getId() === m.getId();
-      if (!trasClasificarMensajeHilo_(m, esPrimero).entra) return;
-      candidatos.push({ msg: m, hiloId: hilo.getId(), esPrimero: esPrimero, posicion: nuevos.indexOf(m) });
+      candidatos.push({ msg: m, hiloId: hilo.getId(), esPrimero: !!primero && primero.getId() === m.getId(), posicion: nuevos.indexOf(m) });
     });
   });
   candidatos.sort(function (a, b) { return a.msg.getDate() - b.msg.getDate(); });
 
+  // 1b) aplicar la regla: un solo "primer correo" por hilo Y por fecha+banco; remitentes ignorados; lo demás solo con palabra clave
+  const reclamadas = {}; Object.keys(idx.claves).forEach(function (k) { reclamadas[k] = idx.claves[k]; });
+  const aceptados = [];
+  candidatos.forEach(function (c) {
+    const asu = c.msg.getSubject() || '';
+    const clave = trasClaveDia_(trasFechaAsunto_(asu), trasDestinoDeAsunto_(asu, cat));
+    let esPrimero = c.esPrimero;
+    if (esPrimero && trasRemitenteIgnorado_(c.msg)) esPrimero = false;
+    if (esPrimero && TRAS.UN_PRINCIPAL_POR_BANCO_Y_DIA && clave && reclamadas[clave] && reclamadas[clave] !== c.hiloId) esPrimero = false;   // otro correo ya es el primero de ese banco y fecha
+    const dec = trasClasificarMensajeHilo_(c.msg, esPrimero);
+    if (!dec.entra) {
+      resumen.omitidos++;
+      trasLog_(ss, 'INFO', 'Correo omitido (no es captura a validar)', String(c.msg.getFrom() || '').replace(/<.*$/, '').trim() + ' · "' + asu + '" · ' + Utilities.formatDate(c.msg.getDate(), TRAS.TZ, 'dd/MM HH:mm') + ' · id ' + c.msg.getId() + ' · ' + dec.motivo + (c.esPrimero && !esPrimero ? ' (era candidato a primero pero ya hay otro correo/remitente que lo es)' : ''));
+      return;
+    }
+    if (esPrimero && clave) reclamadas[clave] = c.hiloId;
+    c.esPrimero = esPrimero; aceptados.push(c);
+  });
+
   // 2) procesar con tope de tiempo
   const nuevos = [];
   const principalEnCorrida = {};
-  for (let i = 0; i < candidatos.length; i++) {
-    if (i >= TRAS.MAX_MENSAJES_POR_CORRIDA || (Date.now() - t0) > TRAS.TIEMPO_MAX_MS) { resumen.pendientesProximaCorrida = candidatos.length - i; break; }
-    const c = candidatos[i];
+  for (let i = 0; i < aceptados.length; i++) {
+    if (i >= TRAS.MAX_MENSAJES_POR_CORRIDA || (Date.now() - t0) > TRAS.TIEMPO_MAX_MS) { resumen.pendientesProximaCorrida = aceptados.length - i; break; }
+    const c = aceptados[i];
     try {
       const regs = trasProcesarMensaje_(ss, c, cat, idx, principalEnCorrida, o);
       if (regs === null) { resumen.errores++; continue; }       // reintentará en la próxima corrida
@@ -764,7 +796,7 @@ function trasIngesta_(ss, o, t0) {
   if (resumen.sinLectura) resumen.mensaje += ' ' + resumen.sinLectura + ' sin lectura: revísalas.';
   if (resumen.pendientesProximaCorrida) resumen.mensaje += ' Quedan ' + resumen.pendientesProximaCorrida + ' correo(s) para la próxima corrida.';
   if (resumen.errores) resumen.mensaje += ' ' + resumen.errores + ' con error (se reintentan).';
-  trasLog_(ss, 'INFO', resumen.mensaje, JSON.stringify({ consulta: consulta, hilos: hilos.length, candidatos: candidatos.length }));
+  trasLog_(ss, 'INFO', resumen.mensaje, JSON.stringify({ consulta: consulta, hilos: hilos.length, candidatos: candidatos.length, aceptados: aceptados.length }));
   return resumen;
 }
 
@@ -782,6 +814,25 @@ function trasClasificarMensajeHilo_(msg, esPrimero) {
   if (/extraordinari/i.test(asunto) || /extraordinari/i.test(nuevo)) return { entra: true, motivo: 'Dice "extraordinario" → Extraordinario' };
   if (TRAS.SEGUNDO_TRASPASO.test(asunto) || TRAS.SEGUNDO_TRASPASO.test(nuevo)) return { entra: true, motivo: 'Pide Vo.Bo. de otro traspaso → Extraordinario' };
   return { entra: false, motivo: 'IGNORADO: no es el primer correo y su texto nuevo no dice "extraordinario" ni pide Vo.Bo.' };
+}
+
+/** Primer correo del hilo (el que lleva la captura a validar). null si el hilo ya tiene Principal o no aplica. */
+function trasPrimeroDelHilo_(ms, nuevos, yaTienePrincipal, yo) {
+  if (yaTienePrincipal || !nuevos.length) return null;
+  if (!TRAS.PRIMER_CORREO_ESTRICTO) {
+    return nuevos.filter(function (m) { return !trasEsRespuesta_(m.getSubject()); })[0] || nuevos[0] || null;
+  }
+  // estricto: el primer mensaje real del hilo (sin borradores ni los tuyos)
+  let primero = null;
+  for (let i = 0; i < ms.length && !primero; i++) {
+    let borrador = false; try { borrador = ms[i].isDraft(); } catch (e) {}
+    if (borrador) continue;
+    if (yo && String(ms[i].getFrom() || '').toLowerCase().indexOf(yo) >= 0) continue;
+    primero = ms[i];
+  }
+  if (!primero) return null;
+  const id = primero.getId();
+  return nuevos.filter(function (m) { return m.getId() === id; })[0] || null;
 }
 
 /** Procesa un correo → arreglo de registros (uno por operación). null = fallo transitorio, se reintenta. */
@@ -1094,18 +1145,20 @@ function traspasosExplicarHilo(messageId) {
   const ms = hilo.getMessages();
   const yo = trasUsuario_().toLowerCase();
   Logger.log('HILO: ' + trasLimpiarAsunto_(base.getSubject()) + ' · ' + ms.length + ' mensaje(s)');
-  let primeroVisto = false;
+  // mismo criterio que la ingesta: primero del hilo según TRAS.PRIMER_CORREO_ESTRICTO
+  const validos = ms.filter(function (m) { return trasEsAsuntoTraspaso_(m.getSubject() || '', cat) && !(yo && String(m.getFrom() || '').toLowerCase().indexOf(yo) >= 0) && trasImagenesDe_(m).length > 0; });
+  const primeroMsg = trasPrimeroDelHilo_(ms, validos, false, yo);
+  Logger.log('Regla: primer correo ' + (TRAS.PRIMER_CORREO_ESTRICTO ? 'ESTRICTO (primer mensaje del hilo)' : 'primero con capturas') + ' · remitentes ignorados: ' + JSON.stringify(TRAS.IGNORAR_REMITENTES));
   ms.forEach(function (m, i) {
     const asunto = m.getSubject() || '';
     const fecha = Utilities.formatDate(m.getDate(), TRAS.TZ, 'dd/MM HH:mm');
-    const cab = (i + 1) + '. ' + fecha + ' · ' + String(m.getFrom() || '').replace(/<.*$/, '').trim() + ' · "' + asunto + '"';
+    const cab = (i + 1) + '. ' + fecha + ' · ' + String(m.getFrom() || '').replace(/<.*$/, '').trim() + ' · "' + asunto + '" · id ' + m.getId();
     if (!trasEsAsuntoTraspaso_(asunto, cat)) { Logger.log(cab + '\n   → no cuenta: el asunto no es de traspasos'); return; }
     if (yo && String(m.getFrom() || '').toLowerCase().indexOf(yo) >= 0) { Logger.log(cab + '\n   → no cuenta: lo enviaste tú'); return; }
     const nImg = trasImagenesDe_(m).length;
     if (!nImg) { Logger.log(cab + '\n   → no cuenta: no trae imágenes válidas'); return; }
-    const esPrimero = !primeroVisto && !trasEsRespuesta_(asunto);
-    if (esPrimero) primeroVisto = true;
+    const esPrimero = !!primeroMsg && primeroMsg.getId() === m.getId() && !trasRemitenteIgnorado_(m);
     const d = trasClasificarMensajeHilo_(m, esPrimero);
-    Logger.log(cab + ' · ' + nImg + ' imagen(es)\n   → ' + (d.entra ? 'SE VALIDA: ' : '') + d.motivo);
+    Logger.log(cab + ' · ' + nImg + ' imagen(es)\n   → ' + (d.entra ? 'SE VALIDA: ' : '') + d.motivo + '\n   texto nuevo (lo que se evaluó): "' + trasTextoNuevo_(m.getPlainBody()).replace(/\s+/g, ' ').slice(0, 160) + '"');
   });
 }
