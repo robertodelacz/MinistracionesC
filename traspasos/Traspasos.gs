@@ -1,10 +1,10 @@
 /* ==========================================================================
    TRASPASOS V2  ·  Núcleo (configuración, catálogo, validaciones, ingesta, hoja)
    --------------------------------------------------------------------------
-   Archivos del módulo (copiar los tres al proyecto de Apps Script):
+   Archivos del módulo (solo dos en el proyecto de Apps Script):
      · Traspasos.gs      → este archivo (reemplaza al Traspasos.gs anterior)
      · TraspasosOCR.gs   → lectura de capturas (Claude + respaldo OCR de Drive)
-     · TraspasosApp.gs   → pantalla para compu y celular + web app
+   (opcional/TraspasosApp.gs = pantalla web para celular; NO se necesita, la hoja ya basta)
 
    Qué hace:
      1. Busca en Gmail los correos de traspasos (asunto con fecha yyyymmdd y banco).
@@ -1064,6 +1064,19 @@ function traspasosOnEdit_(e) {
 /* ======================================================================
    DISPARADOR AUTOMÁTICO  +  CLAVE  +  COMPATIBILIDAD
    ====================================================================== */
+
+/** Submenú para On Open.gs:  .addSubMenu(traspasosMenu_())  */
+function traspasosMenu_() {
+  return SpreadsheetApp.getUi().createMenu('🏦 Traspasos')
+    .addItem('🔄 Actualizar traspasos', 'revisarTraspasos')
+    .addSeparator()
+    .addItem('📋 Importar catálogo desde el historial', 'traspasosImportarCatalogo')
+    .addItem('🔑 Guardar clave de Claude', 'traspasosGuardarClave')
+    .addItem('⏱️ Activar actualización automática', 'traspasosInstalarDisparador')
+    .addItem('⏹️ Quitar actualización automática', 'traspasosQuitarDisparador')
+    .addItem('🎨 Reaplicar formato de la hoja', 'traspasosActualizarFormato');
+}
+
 function traspasosActualizarAuto() {
   const ahora = new Date();
   const h = parseInt(Utilities.formatDate(ahora, TRAS.TZ, 'H'), 10);
