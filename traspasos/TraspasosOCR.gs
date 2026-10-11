@@ -106,12 +106,13 @@ function trasLeerConClaude_(blob, clave, ctx) {
     max_tokens: 3000,
     system: TRAS_PROMPT_SISTEMA,
     tools: [TRAS_ESQUEMA_HERRAMIENTA],
-    tool_choice: { type: 'tool', name: 'registrar_operaciones' },
+    // Sin tool_choice forzado: algunos modelos nuevos responden HTTP 400 ("tool_choice type tool/any not supported").
+    // Se pide la herramienta en el texto y, si aun así contestara texto, se lee el JSON de ahí.
     messages: [{
       role: 'user',
       content: [
         { type: 'image', source: { type: 'base64', media_type: trasContentType_(blob), data: Utilities.base64Encode(bytes) } },
-        { type: 'text', text: 'Transcribe las operaciones de esta captura. Asunto del correo (solo contexto, no lo uses para llenar datos): ' + String((ctx && ctx.asunto) || '').slice(0, 200) }
+        { type: 'text', text: 'Transcribe las operaciones de esta captura y entrega el resultado SIEMPRE llamando a la herramienta registrar_operaciones (no respondas en texto). Asunto del correo (solo contexto, no lo uses para llenar datos): ' + String((ctx && ctx.asunto) || '').slice(0, 200) }
       ]
     }]
   };
@@ -138,9 +139,15 @@ function trasLeerConClaude_(blob, clave, ctx) {
 function trasInterpretarClaude_(textoRespuesta) {
   let j;
   try { j = JSON.parse(textoRespuesta); } catch (e) { return { ok: false, motor: 'CLAUDE', error: 'respuesta no legible', transitorio: true }; }
-  const bloque = (j.content || []).filter(function (b) { return b.type === 'tool_use' && b.name === 'registrar_operaciones'; })[0];
-  if (!bloque || !bloque.input) return { ok: false, motor: 'CLAUDE', error: 'Claude no devolvió operaciones', transitorio: true };
-  const inp = bloque.input;
+  const contenido = j.content || [];
+  const bloque = contenido.filter(function (b) { return b.type === 'tool_use' && b.name === 'registrar_operaciones'; })[0];
+  let inp = bloque && bloque.input ? bloque.input : null;
+  if (!inp) {                                                    // respaldo: JSON dentro del texto
+    const txt = contenido.filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join('\n');
+    const m = /\{[\s\S]*\}/.exec(txt);
+    if (m) { try { const o = JSON.parse(m[0]); if (o && (o.operaciones || o.es_comprobante !== undefined)) inp = o; } catch (e) {} }
+  }
+  if (!inp) return { ok: false, motor: 'CLAUDE', error: 'Claude no devolvió operaciones', transitorio: true };
   const ops = (inp.operaciones || []).map(function (o) {
     const notas = [];
     if (o.notas) notas.push('ℹ Nota de lectura: ' + String(o.notas).slice(0, 200));

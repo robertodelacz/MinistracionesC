@@ -35,9 +35,9 @@ const TRAS = {
   // Ojo: "Vo.Bo." suelto NO basta (una publicación como "ya se dio el Vo.Bo." no es un traspaso nuevo);
   // tiene que ser una PETICIÓN: "favor de dar el Vo.Bo.", "solicito Vo.Bo.", "me apoyas con el visto bueno"...
   SEGUNDO_TRASPASO: /extraordinari|(?:solicit\w*|pid\w*|requier\w*|necesit\w*|favor|apoy\w*|ayud\w*|podr\w*|puedes|pueden)[^.\n]{0,80}(?:vo\.?\s*bo\b|vobo|visto\s+bueno)/i,
-  // true = el "primer correo" es el primer mensaje del hilo (si ese no trae capturas, el hilo no tiene Principal
-  // y lo que venga después solo cuenta si dice extraordinario / pide Vo.Bo.). false = el primero que traiga capturas.
-  PRIMER_CORREO_ESTRICTO: true,
+  // false (como el código viejo) = el primer correo es el primer mensaje con capturas que NO sea "Re:/RV:/Fwd:".
+  // true = debe ser el primer mensaje del hilo, sin excepción.
+  PRIMER_CORREO_ESTRICTO: false,
   // true = por cada fecha+banco del asunto solo UN hilo puede ser "primer correo"; un correo nuevo (no respuesta) con el
   // mismo asunto después, p. ej. una publicación, ya no cuenta salvo que diga extraordinario. Déjalo en false si
   // Cuentas por pagar manda hilos separados para dos traspasos distintos al mismo banco el mismo día.
@@ -46,7 +46,7 @@ const TRAS = {
   // si dicen extraordinario / piden Vo.Bo. Ej.: ['jazmin']
   IGNORAR_REMITENTES: [],
   MAX_HILOS: 80,
-  MIN_BYTES_IMAGEN: 8 * 1024,            // descarta logos / firmas pequeñas
+  MIN_BYTES_IMAGEN: 5 * 1024,            // descarta logos / firmas pequeñas
   MAX_MENSAJES_POR_CORRIDA: 25,
   TIEMPO_MAX_MS: 4.5 * 60 * 1000,        // Apps Script corta a los 6 min
   MAX_INTENTOS_LECTURA: 3,               // luego deja fila "SIN LECTURA"
@@ -101,20 +101,21 @@ const TRAS_COLS = [
   { k: 'valCargo',    t: 'VAL. CARGO',               w: 190, g: 3 },
   { k: 'valBenef',    t: 'VAL. BENEFICIARIA',        w: 190, g: 3 },
   { k: 'avisos',      t: 'AVISOS',                   w: 320, g: 3 },
-  { k: 'votoPor',     t: 'VO.BO. POR',               w: 170, g: 4 },
-  { k: 'votoFecha',   t: 'FECHA VO.BO.',             w: 125, g: 4 },
+  { k: 'votoPor',     t: 'VO.BO. POR',               w: 170, g: 4, o: 1 },
+  { k: 'votoFecha',   t: 'FECHA VO.BO.',             w: 125, g: 4, o: 1 },
   { k: 'nota',        t: 'NOTA / OBSERVACIÓN',       w: 220, g: 4 },
   { k: 'mensaje',     t: 'MENSAJE',                  w: 320, g: 4 },
-  { k: 'asunto',      t: 'ASUNTO',                   w: 260, g: 5 },
-  { k: 'remitente',   t: 'REMITENTE',                w: 200, g: 5 },
-  { k: 'idMensaje',   t: 'ID MENSAJE',               w: 130, g: 5 },
-  { k: 'idFila',      t: 'ID FILA',                  w: 150, g: 5 },
-  { k: 'imagen',      t: 'IMAGEN Nº',                w: 70,  g: 5 },
-  { k: 'motor',       t: 'MOTOR',                    w: 130, g: 5 },
-  { k: 'huella',      t: 'HUELLA DE IMAGEN',         w: 130, g: 5 },
-  { k: 'idHilo',      t: 'ID HILO',                  w: 130, g: 5 },
-  { k: 'lectura',     t: 'LECTURA ORIGINAL',         w: 260, g: 5 }
+  { k: 'asunto',      t: 'ASUNTO',                   w: 260, g: 5, o: 1 },
+  { k: 'remitente',   t: 'REMITENTE',                w: 200, g: 5, o: 1 },
+  { k: 'idMensaje',   t: 'ID MENSAJE',               w: 130, g: 5, o: 1 },
+  { k: 'idFila',      t: 'ID FILA',                  w: 150, g: 5, o: 1 },
+  { k: 'imagen',      t: 'IMAGEN Nº',                w: 70,  g: 5, o: 1 },
+  { k: 'motor',       t: 'MOTOR',                    w: 130, g: 5, o: 1 },
+  { k: 'huella',      t: 'HUELLA DE IMAGEN',         w: 130, g: 5, o: 1 },
+  { k: 'idHilo',      t: 'ID HILO',                  w: 130, g: 5, o: 1 },
+  { k: 'lectura',     t: 'LECTURA ORIGINAL',         w: 260, g: 5, o: 1 }
 ];
+// o:1 = columna técnica, se crea OCULTA (no se borra: el sistema la usa). Para verla: clic derecho entre columnas > Mostrar.
 const TRAS_GRUPOS = { 1: 'ESTADO Y VISTO BUENO', 2: 'OPERACIÓN', 3: 'VALIDACIÓN', 4: 'SEGUIMIENTO', 5: 'ORIGEN (no editar)' };
 const TRAS_FILA_ENC = 2, TRAS_FILA_DATOS = 3;
 
@@ -541,6 +542,13 @@ function trasFormulaLetra_(fila, mapa) {
   return '=IF(AND(ISNUMBER($' + m + fila + '),$' + m + fila + '>0),NUM_TEXTO($' + m + fila + '),"")';
 }
 
+function trasOcultarTecnicas_(h) {
+  try {
+    const mapa = trasMapa_(h);
+    TRAS_COLS.forEach(function (c) { if (c.o && mapa[c.k]) h.hideColumns(mapa[c.k]); });
+  } catch (e) { Logger.log('trasOcultarTecnicas_: ' + e); }
+}
+
 function trasCrearHoja_(ss) {
   let h = ss.getSheetByName(TRAS.HOJA);
   if (h && h.getLastRow() >= TRAS_FILA_ENC) return h;
@@ -556,6 +564,7 @@ function trasCrearHoja_(ss) {
   h.getRange(TRAS_FILA_ENC, 1, 1, n).setValues([TRAS_COLS.map(function (c) { return c.t; })])
     .setBackground(C.ENCABEZADO).setFontColor(C.ENCABEZADO_TEXTO).setFontWeight('bold').setWrap(true).setVerticalAlignment('middle');
   TRAS_COLS.forEach(function (c, i) { h.setColumnWidth(i + 1, c.w); });
+  trasOcultarTecnicas_(h);
   h.setFrozenRows(TRAS_FILA_ENC);
   h.setRowHeight(TRAS_FILA_ENC, 34);
 
@@ -724,7 +733,7 @@ function trasIngesta_(ss, o, t0) {
   if (!cat.hayDatos) resumen.aviso = 'El catálogo está vacío: se leerán las capturas pero no se podrán validar cuentas. Corre "Importar catálogo".';
 
   const desde = Math.floor((Date.now() - (o.horasAtras || TRAS.HORAS_ATRAS) * 3600 * 1000) / 1000);
-  const consulta = 'subject:(' + TRAS.ASUNTO_PALABRAS + ') has:attachment after:' + desde;
+  const consulta = 'subject:(' + TRAS.ASUNTO_PALABRAS + ') after:' + desde;
   const hilos = GmailApp.search(consulta, 0, TRAS.MAX_HILOS) || [];
   const idx = trasIndice_(hoja, mapa);
   const yo = trasUsuario_().toLowerCase();
@@ -820,7 +829,7 @@ function trasClasificarMensajeHilo_(msg, esPrimero) {
 function trasPrimeroDelHilo_(ms, nuevos, yaTienePrincipal, yo) {
   if (yaTienePrincipal || !nuevos.length) return null;
   if (!TRAS.PRIMER_CORREO_ESTRICTO) {
-    return nuevos.filter(function (m) { return !trasEsRespuesta_(m.getSubject()); })[0] || nuevos[0] || null;
+    return nuevos.filter(function (m) { return !trasEsRespuesta_(m.getSubject()); })[0] || null;
   }
   // estricto: el primer mensaje real del hilo (sin borradores ni los tuyos)
   let primero = null;
@@ -1119,6 +1128,7 @@ function traspasosActualizarFormato() {
   const ss = trasSS_(); const h = ss.getSheetByName(TRAS.HOJA);
   if (!h) { trasCrearHoja_(ss); return; }
   trasReglas_(h, trasMapa_(h));
+  trasOcultarTecnicas_(h);
 }
 
 /** Para el menú y para disparadores que ya apuntaban a la función anterior. */
@@ -1161,7 +1171,7 @@ function traspasosExplicarHilo(messageId) {
   // mismo criterio que la ingesta: primero del hilo según TRAS.PRIMER_CORREO_ESTRICTO
   const validos = ms.filter(function (m) { return trasEsAsuntoTraspaso_(m.getSubject() || '', cat) && !(yo && String(m.getFrom() || '').toLowerCase().indexOf(yo) >= 0) && trasImagenesDe_(m).length > 0; });
   const primeroMsg = trasPrimeroDelHilo_(ms, validos, false, yo);
-  Logger.log('Regla: primer correo ' + (TRAS.PRIMER_CORREO_ESTRICTO ? 'ESTRICTO (primer mensaje del hilo)' : 'primero con capturas') + ' · remitentes ignorados: ' + JSON.stringify(TRAS.IGNORAR_REMITENTES));
+  Logger.log('Regla: primer correo ' + (TRAS.PRIMER_CORREO_ESTRICTO ? 'ESTRICTO (primer mensaje del hilo)' : 'primero con capturas que no sea Re:') + ' · remitentes ignorados: ' + JSON.stringify(TRAS.IGNORAR_REMITENTES));
   ms.forEach(function (m, i) {
     const asunto = m.getSubject() || '';
     const fecha = Utilities.formatDate(m.getDate(), TRAS.TZ, 'dd/MM HH:mm');
