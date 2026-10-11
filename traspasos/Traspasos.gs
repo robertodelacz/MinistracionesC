@@ -30,6 +30,9 @@ const TRAS = {
   HORAS_ATRAS: 72,                       // ventana de búsqueda (cubre fines de semana)
   ASUNTO_PALABRAS: 'TRASPASO OR TRASPASOS OR EXTRAORDINARIO OR EXTRAORDINARIA OR EXTRAORDINARIOS',
   EXCLUIR_ASUNTO: /SOLICITUD\s+TRASPASO\s+ENTRE\s+CUENTAS/i,   // correos de otro proceso
+  // Después del primer correo del hilo, solo cuentan los mensajes que digan esto (extraordinario o pidiendo Vo.Bo.).
+  // Todo lo demás del hilo (publicaciones, comprobantes finales, respuestas) NO se valida.
+  SEGUNDO_TRASPASO: /extraordinari|vo\.?\s*bo\b|vobo|visto\s+bueno/i,
   MAX_HILOS: 80,
   MIN_BYTES_IMAGEN: 8 * 1024,            // descarta logos / firmas pequeñas
   MAX_MENSAJES_POR_CORRIDA: 25,
@@ -670,7 +673,7 @@ function trasIndice_(hoja, mapa, excluirMsg) {
     const m = String(msg[i]);
     if (m) idx.msgs[m] = (idx.msgs[m] || 0) + 1;
     if (hue[i]) (idx.huellas[hue[i]] = idx.huellas[hue[i]] || []).push({ msg: m, hilo: String(hilo[i]), fila: TRAS_FILA_DATOS + i });
-    if (hilo[i] && tipo[i] === 'Principal' && est[i] !== 'DESCARTADO') idx.hilosPrincipal[String(hilo[i])] = true;
+    if (hilo[i]) idx.hilosPrincipal[String(hilo[i])] = true;      // el hilo ya tiene su primer correo registrado (aunque se haya descartado)
     const dia = trasDiaMx_(fAs[i]);
     if (dia && est[i] !== 'DESCARTADO') {
       const k = dia + '|' + dest[i];
@@ -729,7 +732,13 @@ function trasIngesta_(ss, o, t0) {
     const primero = idx.hilosPrincipal[hilo.getId()] ? null
       : (nuevos.filter(function (m) { return !trasEsRespuesta_(m.getSubject()); })[0] || nuevos[0] || null);
     nuevos.forEach(function (m) {
-      candidatos.push({ msg: m, hiloId: hilo.getId(), esPrimero: !!primero && primero.getId() === m.getId(), posicion: nuevos.indexOf(m) });
+      const esPrimero = !!primero && primero.getId() === m.getId();
+      if (!esPrimero) {
+        // Mensaje posterior del hilo: solo si dice "extraordinario" o pide el Vo.Bo. de otro traspaso
+        const nuevoTxt = trasTextoNuevo_(m.getPlainBody());
+        if (!TRAS.SEGUNDO_TRASPASO.test(m.getSubject() || '') && !TRAS.SEGUNDO_TRASPASO.test(nuevoTxt)) return;
+      }
+      candidatos.push({ msg: m, hiloId: hilo.getId(), esPrimero: esPrimero, posicion: nuevos.indexOf(m) });
     });
   });
   candidatos.sort(function (a, b) { return a.msg.getDate() - b.msg.getDate(); });
@@ -773,19 +782,16 @@ function trasProcesarMensaje_(ss, c, cat, idx, principalEnCorrida, o) {
   const fechaAsunto = trasFechaAsunto_(asunto);
   const destinoAsunto = trasDestinoDeAsunto_(asunto, cat);
 
-  // ¿Principal o Extraordinario?
+  // Principal = primer correo del hilo. Cualquier otro mensaje que llegó hasta aquí ya cumplió la regla
+  // (dice "extraordinario" o pide Vo.Bo. de otro traspaso) → Extraordinario.
   const nuevoTxt = trasTextoNuevo_(msg.getPlainBody());
   const dicExtra = /extraordinari/i.test(asunto) || /extraordinari/i.test(nuevoTxt);
-  const hiloTienePrincipal = !!idx.hilosPrincipal[c.hiloId] || !!principalEnCorrida[c.hiloId];
   let tipo, avisoTipo = '';
   if (dicExtra) tipo = 'Extraordinario';
-  else if (!hiloTienePrincipal && c.esPrimero) tipo = 'Principal';
-  else { tipo = 'Extraordinario'; avisoTipo = 'ℹ Marcado como Extraordinario por ser otro envío con captura dentro del mismo hilo.'; }
+  else if (c.esPrimero) tipo = 'Principal';
+  else { tipo = 'Extraordinario'; avisoTipo = 'ℹ Segundo traspaso del hilo (el correo pide Vo.Bo. sin decir "extraordinario").'; }
   const otrosMismoDia = (fechaAsunto && destinoAsunto) ? (idx.porDia[fechaAsunto + '|' + destinoAsunto] || []).filter(function (x) { return x.hilo !== c.hiloId; }) : [];
-  if (tipo === 'Principal' && otrosMismoDia.length) {
-    tipo = 'Extraordinario';
-    avisoTipo = 'ℹ Ya había un traspaso a ' + destinoAsunto + ' con la misma fecha en otro correo: se marcó como Extraordinario.';
-  }
+  if (otrosMismoDia.length) avisoTipo = (avisoTipo ? avisoTipo + ' ' : '') + 'ℹ Ya había otro traspaso a ' + destinoAsunto + ' con la misma fecha en otro correo.';
 
   const intentosClave = 'TRAS_INT_' + msgId;
   const props = PropertiesService.getScriptProperties();
@@ -866,7 +872,6 @@ function trasProcesarMensaje_(ss, c, cat, idx, principalEnCorrida, o) {
     return [reg];
   }
   try { props.deleteProperty(intentosClave); } catch (e) {}
-  if (tipo === 'Principal') principalEnCorrida[c.hiloId] = true;
   // Actualiza el índice para los siguientes correos de la misma corrida
   registros.forEach(function (r) {
     idx.msgs[msgId] = (idx.msgs[msgId] || 0) + 1;
