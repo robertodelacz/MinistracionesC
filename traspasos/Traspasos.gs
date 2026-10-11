@@ -485,6 +485,22 @@ function trasEsImagen_(a) {
   return /^image\/(png|jpe?g|gif|webp)$/i.test(ct) || (/octet-stream/i.test(ct) && /\.(png|jpe?g|gif|webp)$/i.test(nom));
 }
 
+/** Explica en una línea qué adjuntos trae un mensaje y por qué se usan o no (para diagnóstico). */
+function trasDescribirAdjuntos_(m) {
+  let atts = [];
+  try { atts = m.getAttachments({ includeInlineImages: true, includeAttachments: true }) || []; } catch (e) { try { atts = m.getAttachments() || []; } catch (e2) {} }
+  if (!atts.length) return 'sin adjuntos ni imágenes incrustadas';
+  return atts.length + ' adjunto(s): ' + atts.map(function (a) {
+    let ct = '', nom = '', n = 0;
+    try { ct = String(a.getContentType() || ''); } catch (e) {}
+    try { nom = String(a.getName() || '(sin nombre)'); } catch (e) {}
+    try { n = a.getSize ? a.getSize() : a.getBytes().length; } catch (e) {}
+    const kb = Math.round(n / 1024) + ' KB';
+    const estado = !trasEsImagen_(a) ? 'NO es imagen png/jpg → no se lee' : (n && n < TRAS.MIN_BYTES_IMAGEN ? 'imagen muy chica (logo/firma) → se descarta' : 'imagen válida');
+    return nom + ' [' + ct + ', ' + kb + ', ' + estado + ']';
+  }).join('; ');
+}
+
 /** Imágenes candidatas de un mensaje, en orden estable (el índice se usa para volver a buscarlas). */
 function trasImagenesDe_(msg) {
   let atts = [];
@@ -746,6 +762,7 @@ function trasIngesta_(ss, o, t0) {
 
   // 1) reunir mensajes candidatos, con la información del hilo para decidir Principal/Extraordinario
   const candidatos = [];
+  const sinPrincipal = [];     // hilos con respuestas pero sin un primer correo con captura
   hilos.forEach(function (hilo) {
     let ms = [];
     try { ms = hilo.getMessages(); } catch (e) { return; }
@@ -760,6 +777,7 @@ function trasIngesta_(ss, o, t0) {
       return trasImagenesDe_(m).length > 0;
     });
     const primero = trasPrimeroDelHilo_(ms, nuevos, idx.hilosPrincipal[hilo.getId()], yo);
+    if (nuevos.length && !primero && !idx.hilosPrincipal[hilo.getId()]) sinPrincipal.push({ ms: ms, hilo: hilo });
     nuevos.forEach(function (m) {
       candidatos.push({ msg: m, hiloId: hilo.getId(), esPrimero: !!primero && primero.getId() === m.getId(), posicion: nuevos.indexOf(m) });
     });
@@ -783,6 +801,22 @@ function trasIngesta_(ss, o, t0) {
     }
     if (esPrimero && clave) reclamadas[clave] = c.hiloId;
     c.esPrimero = esPrimero; aceptados.push(c);
+  });
+
+  // 1c) hilos donde NO se encontró el primer correo con captura: avisar con el motivo de cada mensaje (nada se pierde en silencio)
+  sinPrincipal.forEach(function (x) {
+    const lineas = x.ms.map(function (m, i) {
+      let porque;
+      if (m.getDate().getTime() < ventanaMs) porque = 'fuera de la ventana de búsqueda';
+      else if (m.getDate().getTime() >= hastaMs) porque = 'es de un día posterior al de la prueba';
+      else if (!trasEsAsuntoTraspaso_(m.getSubject(), cat)) porque = 'su asunto no es de traspasos';
+      else if (yo && String(m.getFrom() || '').toLowerCase().indexOf(yo) >= 0) porque = 'lo enviaste tú (' + yo + ')';
+      else if (!trasImagenesDe_(m).length) porque = 'NO trae imágenes que se puedan leer · ' + trasDescribirAdjuntos_(m);
+      else porque = trasEsRespuesta_(m.getSubject()) ? 'es "Re:", nunca es el principal' : 'trae imágenes';
+      return (i + 1) + ') ' + Utilities.formatDate(m.getDate(), TRAS.TZ, 'dd/MM HH:mm') + ' ' + String(m.getFrom() || '').replace(/<.*$/, '').trim() + ' "' + (m.getSubject() || '') + '" id ' + m.getId() + ' → ' + porque;
+    });
+    resumen.hilosSinPrincipal = (resumen.hilosSinPrincipal || 0) + 1;
+    trasLog_(ss, 'AVISO', 'Hilo sin primer correo con captura: "' + trasLimpiarAsunto_(x.ms[0].getSubject()) + '"', lineas.join('\n'));
   });
 
   // 2) procesar con tope de tiempo
@@ -810,6 +844,7 @@ function trasIngesta_(ss, o, t0) {
   if (resumen.sinLectura) resumen.mensaje += ' ' + resumen.sinLectura + ' sin lectura: revísalas.';
   if (resumen.pendientesProximaCorrida) resumen.mensaje += ' Quedan ' + resumen.pendientesProximaCorrida + ' correo(s) para la próxima corrida.';
   if (resumen.errores) resumen.mensaje += ' ' + resumen.errores + ' con error (se reintentan).';
+  if (resumen.hilosSinPrincipal) resumen.mensaje += ' ⚠ ' + resumen.hilosSinPrincipal + ' hilo(s) sin captura en el primer correo: mira LOG TRASPASOS V2 (nivel AVISO).';
   trasLog_(ss, 'INFO', resumen.mensaje, JSON.stringify({ consulta: consulta, hilos: hilos.length, candidatos: candidatos.length, aceptados: aceptados.length }));
   return resumen;
 }
@@ -1223,7 +1258,7 @@ function traspasosExplicarHilo(messageId) {
     if (!trasEsAsuntoTraspaso_(asunto, cat)) { Logger.log(cab + '\n   → no cuenta: el asunto no es de traspasos'); return; }
     if (yo && String(m.getFrom() || '').toLowerCase().indexOf(yo) >= 0) { Logger.log(cab + '\n   → no cuenta: lo enviaste tú'); return; }
     const nImg = trasImagenesDe_(m).length;
-    if (!nImg) { Logger.log(cab + '\n   → no cuenta: no trae imágenes válidas'); return; }
+    if (!nImg) { Logger.log(cab + '\n   → no cuenta: no trae imágenes que se puedan leer · ' + trasDescribirAdjuntos_(m)); return; }
     const esPrimero = !!primeroMsg && primeroMsg.getId() === m.getId() && !trasRemitenteIgnorado_(m);
     const d = trasClasificarMensajeHilo_(m, esPrimero);
     Logger.log(cab + ' · ' + nImg + ' imagen(es)\n   → ' + (d.entra ? 'SE VALIDA: ' : '') + d.motivo + '\n   texto nuevo (lo que se evaluó): "' + trasTextoNuevo_(m.getPlainBody()).replace(/\s+/g, ' ').slice(0, 160) + '"');
