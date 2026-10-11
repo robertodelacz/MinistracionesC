@@ -5,7 +5,7 @@ function onOpen() {
     .addItem('📈 KPIs Desembolsos', 'mostrarDashboardKPIs')
     .addSeparator()
     .addItem('Calculo Pagos', 'recalcularPagos_Bulk')
-    .addItem('Actualizar Traspasos', 'revisarTraspasos')
+    .addSubMenu(traspasosMenu_())
 
     .addToUi();
 }

@@ -10,6 +10,9 @@ const COL_C  = 3;   // Fecha solicitud
 function onEdit(e) {
   if (!e || !e.range) return;
 
+  // 🏦 Traspasos V2: casilla VO.BO. y lista ESTADO (devuelve true si la edición era de esa hoja)
+  if (typeof traspasosOnEdit_ === 'function' && traspasosOnEdit_(e)) return;
+
   const sheet = e.range.getSheet();
   const sheetName = sheet.getName();
   const range = e.range;
