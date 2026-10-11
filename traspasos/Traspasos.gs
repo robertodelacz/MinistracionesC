@@ -53,7 +53,7 @@ const TRAS = {
 
   // --- Lectura de capturas ---
   MOTOR: 'AUTO',                         // 'AUTO' (Claude si hay clave, si no Drive) | 'CLAUDE' | 'DRIVE'
-  CLAUDE_MODELO: 'claude-sonnet-5-5',
+  CLAUDE_MODELO: 'claude-haiku-5-5',      // Haiku: más rápido y barato para leer capturas; si lo cambias, usa el nombre exacto del modelo
   CLAUDE_URL: 'https://api.anthropic.com/v1/messages',
   CLAUDE_MAX_BYTES: 4.5 * 1024 * 1024,
   OCR_IDIOMA: 'es',
