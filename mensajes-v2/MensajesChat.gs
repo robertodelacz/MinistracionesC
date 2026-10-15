@@ -176,7 +176,7 @@ function probarWebhook() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_MENSAJES.sheetName);
   const clave = sheet ? sheet.getRange(CONFIG_MENSAJES.webhook.threadKeyCellDispersion).getValue() : "";
   const ok = enviarMensajeWebhook_("🧪 Prueba de conexión del bot (" + msgNombreUsuario_(msgCorreoDeEvento_(null)) + ")", clave || "prueba");
-  msgAviso_(ok ? "Webhook OK: revisa el chat." : "El webhook falló: revisa la URL (configurarWebhook) y el registro de ejecución.", "Webhook");
+  msgAviso_(ok ? "Webhook OK: revisa el chat." : "El webhook falló: " + MSG_ESTADO_.motivo, "Webhook");
   return ok;
 }
 
@@ -185,10 +185,13 @@ function probarWebhook() {
  * claveHilo "spaces/.../threads/..." = hilo existente; cualquier otro texto = threadKey libre.
  * Reintenta ante 429 / 5xx. Devuelve true/false.
  */
+const MSG_ESTADO_ = { motivo: "" };   // por qué falló el último envío (se muestra en el aviso)
+
 function enviarMensajeWebhook_(texto, claveHilo) {
+  MSG_ESTADO_.motivo = "";
   const webhookUrl = PropertiesService.getScriptProperties().getProperty("WEBHOOK_URL");
-  if (!webhookUrl) { msgAviso_("No hay URL de webhook guardada. Corre configurarWebhook().", "Webhook"); return false; }
-  if (!claveHilo) { msgAviso_("Falta la clave de hilo en S1 (Dispersión) o S2 (Vencimiento). No se envió.", "Webhook"); return false; }
+  if (!webhookUrl) { MSG_ESTADO_.motivo = "no hay URL de webhook guardada (corre configurarWebhook)"; return false; }
+  if (!claveHilo) { MSG_ESTADO_.motivo = "falta la clave de hilo en S1 (Dispersión) o S2 (Vencimiento)"; return false; }
 
   const valor = claveHilo.toString().trim();
   const esHiloReal = valor.indexOf("spaces/") === 0 && valor.indexOf("/threads/") > 0;
@@ -205,10 +208,13 @@ function enviarMensajeWebhook_(texto, claveHilo) {
       const resp = UrlFetchApp.fetch(url, opciones);
       const codigo = resp.getResponseCode();
       if (codigo === 200) return true;
-      Logger.log("Webhook código " + codigo + ": " + String(resp.getContentText()).slice(0, 300));
+      MSG_ESTADO_.motivo = "el chat respondió HTTP " + codigo + " — " + String(resp.getContentText()).replace(/\s+/g, " ").slice(0, 140);
+      msgLog_("Webhook", "intento " + (intento + 1) + ": " + MSG_ESTADO_.motivo);
       if (codigo !== 429 && codigo < 500) return false;          // 4xx (URL mala, hilo inexistente...): reintentar no ayuda
     } catch (err) {
-      Logger.log("Excepción en webhook: " + err.message);
+      MSG_ESTADO_.motivo = "excepción: " + err.message;
+      msgLog_("Webhook", "intento " + (intento + 1) + ": " + MSG_ESTADO_.motivo);
+      if (/permission|authoriz|permiso|autoriz/i.test(String(err.message))) return false;   // reintentar no sirve: falta permiso
     }
     Utilities.sleep(1500 * (intento + 1));
   }
@@ -401,7 +407,7 @@ function publicarMensajes(filaEspecifica, tipo, correoUsuario) {
             pubD++;
             quitarRojoSolicitud_(ss, v(row, "noLinea"), v(row, "fecha"), v(row, "monto"));
           } else {
-            msgAviso_("Fila " + fila + ": no se pudo enviar la Dispersión al chat. No se marcó como Enviado.", "Publicar");
+            msgAviso_("Fila " + fila + ": no se pudo enviar la Dispersión al chat (" + MSG_ESTADO_.motivo + "). No se marcó como Enviado.", "Publicar");
           }
         }
 
@@ -415,7 +421,7 @@ function publicarMensajes(filaEspecifica, tipo, correoUsuario) {
             sheet.getRange(fila, C.enviadoV).setValue(sello());
             pubV++;
           } else {
-            msgAviso_("Fila " + fila + ": no se pudo enviar el Vencimiento al chat. No se marcó como Enviado.", "Publicar");
+            msgAviso_("Fila " + fila + ": no se pudo enviar el Vencimiento al chat (" + MSG_ESTADO_.motivo + "). No se marcó como Enviado.", "Publicar");
           }
         }
       } catch (errFila) {
