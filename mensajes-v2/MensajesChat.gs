@@ -372,6 +372,7 @@ function generarMensajes(filaEspecifica, tipo, correoUsuario) {
    correoUsuario: quien marcó el checkbox (queda anotado en Enviado)
    ============================================================ */
 function publicarMensajes(filaEspecifica, tipo, correoUsuario) {
+  const fallos = [];     // envíos que fallaron en ESTA corrida; el aviso se decide después de soltar el candado
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(20000)) { msgAviso_("Hay otra publicación en curso. Espera unos segundos y vuelve a marcar.", "Publicar"); return; }
   try {
@@ -407,7 +408,7 @@ function publicarMensajes(filaEspecifica, tipo, correoUsuario) {
             pubD++;
             quitarRojoSolicitud_(ss, v(row, "noLinea"), v(row, "fecha"), v(row, "monto"));
           } else {
-            msgAviso_("Fila " + fila + ": no se pudo enviar la Dispersión al chat (" + MSG_ESTADO_.motivo + "). No se marcó como Enviado.", "Publicar");
+            fallos.push({ fila: fila, col: C.enviadoD, que: "la Dispersión", motivo: MSG_ESTADO_.motivo });
           }
         }
 
@@ -421,7 +422,7 @@ function publicarMensajes(filaEspecifica, tipo, correoUsuario) {
             sheet.getRange(fila, C.enviadoV).setValue(sello());
             pubV++;
           } else {
-            msgAviso_("Fila " + fila + ": no se pudo enviar el Vencimiento al chat (" + MSG_ESTADO_.motivo + "). No se marcó como Enviado.", "Publicar");
+            fallos.push({ fila: fila, col: C.enviadoV, que: "el Vencimiento", motivo: MSG_ESTADO_.motivo });
           }
         }
       } catch (errFila) {
@@ -435,6 +436,24 @@ function publicarMensajes(filaEspecifica, tipo, correoUsuario) {
   } finally {
     try { lock.releaseLock(); } catch (e) {}
   }
+  msgRevisarFallos_(fallos);
+}
+
+/**
+ * Si dos corridas del onEdit coinciden (p. ej. el automático de Google y el instalable), una puede
+ * fallar y la otra publicar. Antes de avisar de un fallo se espera unos segundos y se revisa si la
+ * fila ya quedó como "Enviado": si sí, el fallo era de la corrida de más y NO se avisa (solo queda en el log).
+ */
+function msgRevisarFallos_(fallos) {
+  if (!fallos.length) return;
+  Utilities.sleep(7000);
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(CONFIG_MENSAJES.sheetName);
+  fallos.forEach(function (f) {
+    let ya = false;
+    try { ya = String(sheet.getRange(f.fila, f.col).getValue() || "").indexOf("Enviado") === 0; } catch (e) {}
+    if (ya) msgLog_("Publicar", "fila " + f.fila + ": un intento falló (" + f.motivo + ") pero otra corrida ya publicó " + f.que + ". Sin aviso.");
+    else msgAviso_("Fila " + f.fila + ": no se pudo enviar " + f.que + " al chat (" + f.motivo + "). No se marcó como Enviado.", "Publicar");
+  });
 }
 
 /** Quita el rojo de la solicitud en Solicitudes2026 (coincide No. Línea + Fecha + Monto). */
